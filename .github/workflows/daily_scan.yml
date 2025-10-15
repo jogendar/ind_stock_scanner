@@ -8,6 +8,8 @@ on:
 jobs:
   run-scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # <-- This line grants permission to commit files
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
