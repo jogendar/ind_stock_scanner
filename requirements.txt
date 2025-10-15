@@ -1,0 +1,6 @@
+pandas
+yfinance
+requests
+schedule
+curl_cffi
+openai
