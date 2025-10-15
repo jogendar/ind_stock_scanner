@@ -12,6 +12,7 @@ import io
 import zipfile
 
 def download_equity_list():
+    return False
     """
     Downloads the latest EQUITY_L.csv file from the NSE archives.
     It handles both direct CSV and zipped CSV files.
