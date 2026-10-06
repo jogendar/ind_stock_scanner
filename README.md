@@ -37,11 +37,14 @@ Run the live NSE scan with:
 python3 multibagger_v2.py
 ```
 
-The scanner downloads the current NSE equity list, scores stocks whose current
-price is strictly below Rs 20, and writes
+The scanner downloads the current NSE equity list, treats `EQ` and `BE` series
+stocks identically for scoring, scores stocks whose current price is strictly
+below Rs 20, and writes
 `multibagger_v2_scores_DD_MM_YY.csv`. A score of 50 is the default watchlist
 cutoff. Size affects the score but is not a hard filter; an optional ceiling can
-be supplied with `--max-market-cap-cr`.
+be supplied with `--max-market-cap-cr`. Every result includes an `NSE Series`
+column so trade-for-trade `BE` stocks remain visible without receiving a score
+bonus or penalty.
 
 ```bash
 python3 multibagger_v2.py \

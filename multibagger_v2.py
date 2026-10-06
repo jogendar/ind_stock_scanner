@@ -27,6 +27,9 @@ from score_v2 import (
 )
 
 
+SUPPORTED_NSE_SERIES = frozenset({"EQ", "BE"})
+
+
 def finite_number(value: object) -> float | None:
     try:
         number = float(value)
@@ -62,18 +65,30 @@ def download_equity_list(destination: Path) -> bool:
         return False
 
 
-def load_symbols(path: Path) -> list[str]:
+def load_securities(path: Path) -> list[tuple[str, str]]:
     frame = pd.read_csv(path)
     frame.columns = [str(column).strip() for column in frame.columns]
     if "SYMBOL" not in frame.columns:
         raise ValueError(f"{path} does not contain a SYMBOL column")
     if "SERIES" in frame.columns:
-        frame = frame[frame["SERIES"].astype(str).str.strip().eq("EQ")]
-    return [
-        symbol
-        for symbol in frame["SYMBOL"].astype(str).str.strip().tolist()
-        if symbol
-    ]
+        frame["_NSE_SERIES"] = (
+            frame["SERIES"].astype(str).str.strip().str.upper()
+        )
+        frame = frame[frame["_NSE_SERIES"].isin(SUPPORTED_NSE_SERIES)]
+    else:
+        frame["_NSE_SERIES"] = ""
+
+    securities: list[tuple[str, str]] = []
+    for symbol, series in zip(frame["SYMBOL"], frame["_NSE_SERIES"]):
+        clean_symbol = str(symbol).strip()
+        if clean_symbol:
+            securities.append((clean_symbol, str(series).strip()))
+    return securities
+
+
+def load_symbols(path: Path) -> list[str]:
+    """Return supported symbols while preserving the original public helper."""
+    return [symbol for symbol, _ in load_securities(path)]
 
 
 def scan_stock(
@@ -82,6 +97,7 @@ def scan_stock(
     price_threshold: float,
     candidate_score: float,
     max_market_cap_cr: float | None,
+    nse_series: str = "",
 ) -> dict[str, object] | None:
     ticker = f"{symbol}.NS"
     stock = yf.Ticker(ticker, session=session)
@@ -117,6 +133,7 @@ def scan_stock(
 
     result: dict[str, object] = {
         "Symbol": ticker,
+        "NSE Series": nse_series,
         "Price": price,
         "Market Cap (Cr)": market_cap_cr,
         "V2 Potential Score": potential_score,
@@ -144,19 +161,19 @@ def run_scanner(args: argparse.Namespace) -> int:
         print(f"Error: equity list not found: {args.equity_file}")
         return 1
     try:
-        symbols = load_symbols(args.equity_file)
+        securities = load_securities(args.equity_file)
     except (OSError, ValueError, pd.errors.ParserError) as exc:
         print(f"Error reading equity list: {exc}")
         return 1
     if args.limit is not None:
-        symbols = symbols[: args.limit]
-    print(f"Loaded {len(symbols)} EQ-series symbols.")
+        securities = securities[: args.limit]
+    print(f"Loaded {len(securities)} EQ/BE-series symbols.")
 
     session = Session(impersonate="chrome110")
     results: list[dict[str, object]] = []
     errors = 0
-    for index, symbol in enumerate(symbols, start=1):
-        print(f"[{index}/{len(symbols)}] {symbol}")
+    for index, (symbol, nse_series) in enumerate(securities, start=1):
+        print(f"[{index}/{len(securities)}] {symbol} ({nse_series or 'unknown series'})")
         try:
             result = scan_stock(
                 symbol,
@@ -164,6 +181,7 @@ def run_scanner(args: argparse.Namespace) -> int:
                 args.price_threshold,
                 args.candidate_score,
                 args.max_market_cap_cr,
+                nse_series=nse_series,
             )
             if result is not None:
                 results.append(result)
