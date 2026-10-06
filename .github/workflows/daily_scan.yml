@@ -22,20 +22,35 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run the stock scanner
+      - name: Run the V1 stock scanner (primary)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python multibagger.py
-        
+
+      - name: Run the V2 stock scanner (supplemental)
+        id: v2_scan
+        continue-on-error: true
+        run: |
+          python multibagger_v2.py \
+            --equity-file EQUITY_L.csv \
+            --skip-equity-download \
+            --price-threshold 25 \
+            --candidate-score 50 \
+            --output "v2data/multibagger_v2_scores_$(date -u +'%d_%m_%y').csv"
+
+      - name: Report a supplemental V2 failure
+        if: steps.v2_scan.outcome == 'failure'
+        run: echo "::warning title=V2 scan failed::The primary V1 result will still be committed."
+
       - name: Commit and push if there are changes
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add penny_stock_scores_*.csv
+          git add penny_stock_scores_*.csv v2data/
           # Check if there are staged changes
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Automated daily stock scan results"
+            git commit -m "Automated daily V1 and V2 stock scan results"
             git push
           fi

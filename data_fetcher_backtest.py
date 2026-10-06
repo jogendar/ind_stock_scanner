@@ -6,6 +6,24 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from utils import create_quantitative_skeleton, cagr
 
+
+def first_available_series(frame, names):
+    """Return the first populated Yahoo statement row from ``names``."""
+    for name in names:
+        series = frame.get(name, pd.Series(dtype=float)).dropna()
+        if not series.empty:
+            return series
+    return pd.Series(dtype=float)
+
+
+def annualized_sum(series, periods=4):
+    """Annualize up to ``periods`` newest observations without mixing counts."""
+    values = series.dropna().head(periods)
+    if values.empty:
+        return np.nan
+    return values.sum() * periods / len(values)
+
+
 def fetch_data_from_screener(ticker, session, backtest_date=None):
     """
     Fetches promoter holding data from Screener.in.
@@ -106,6 +124,7 @@ def fetch_quantitative_data(ticker_symbol, backtest_date=None, period="5y"):
         cash_flow = stock.cashflow
         quarterly_fin = stock.quarterly_financials
         quarterly_bal = stock.quarterly_balance_sheet
+        quarterly_cash_flow = stock.quarterly_cashflow
 
         # --- Live Mode (use yfinance 'info' for speed) ---
         if not backtest_date:
@@ -115,7 +134,8 @@ def fetch_quantitative_data(ticker_symbol, backtest_date=None, period="5y"):
                 'stock_price': info.get("regularMarketPrice", info.get("currentPrice")),
                 'eps': info.get("trailingEps"),
                 'roe': info.get("returnOnEquity"),
-                'roce': info.get("returnOnAssets"), # Using ROA as proxy for ROCE
+                # A statement-derived ROCE replaces this ROA fallback below.
+                'roce': info.get("returnOnAssets"),
                 'operating_margin': info.get("operatingMargins"),
                 'net_margin': info.get("profitMargins"),
                 'gross_margin': info.get("grossMargins"),
@@ -140,6 +160,9 @@ def fetch_quantitative_data(ticker_symbol, backtest_date=None, period="5y"):
             cash_flow = cash_flow.loc[:, cash_flow.columns < backtest_date_ts]
             quarterly_fin = quarterly_fin.loc[:, quarterly_fin.columns < backtest_date_ts]
             quarterly_bal = quarterly_bal.loc[:, quarterly_bal.columns < backtest_date_ts]
+            quarterly_cash_flow = quarterly_cash_flow.loc[
+                :, quarterly_cash_flow.columns < backtest_date_ts
+            ]
 
             if quarterly_fin.empty or quarterly_bal.empty:
                 print(f"  - Warning: Not enough quarterly data for {ticker_symbol} to proceed. Skipping.")
@@ -163,38 +186,44 @@ def fetch_quantitative_data(ticker_symbol, backtest_date=None, period="5y"):
             fin_data['market_cap'] = shares_outstanding * latest_price
 
             # 4. Conditionally Calculate or Annualize TTM metrics
-            q_fin_T = quarterly_fin.T
-            q_cash_flow_T = stock.quarterly_cashflow.T # Use unfiltered for TTM calculation
-            num_quarters = len(q_fin_T.get('Total Revenue', pd.Series(dtype=float)).dropna())
-
-            if num_quarters > 0:
-                # Take available quarters and annualize
-                scaling_factor = 4 / num_quarters
-                
-                ttm_revenue = q_fin_T.get('Total Revenue', pd.Series(dtype=float)).dropna().head(num_quarters).sum() * scaling_factor
-                ttm_net_income = q_fin_T.get('Net Income', pd.Series(dtype=float)).dropna().head(num_quarters).sum() * scaling_factor
-                ttm_ebit = q_fin_T.get('EBIT', pd.Series(dtype=float)).dropna().head(num_quarters).sum() * scaling_factor
-                
-                # For cash flow items, use the same logic
-                cf_num_quarters = len(q_cash_flow_T.get('Total Cash From Operating Activities', pd.Series(dtype=float)).dropna())
-                if cf_num_quarters > 0:
-                    cf_scaling_factor = 4 / cf_num_quarters
-                    ttm_op_cash_flow = q_cash_flow_T.get('Total Cash From Operating Activities', pd.Series(dtype=float)).dropna().head(cf_num_quarters).sum() * cf_scaling_factor
-                    ttm_capex = q_cash_flow_T.get('Capital Expenditure', pd.Series(dtype=float)).dropna().head(cf_num_quarters).sum() * cf_scaling_factor
-                    ttm_d_and_a = q_cash_flow_T.get('Depreciation And Amortization', pd.Series(dtype=float)).dropna().head(cf_num_quarters).sum() * cf_scaling_factor
-                else:
-                    ttm_op_cash_flow, ttm_capex, ttm_d_and_a = [np.nan] * 3
-            else:
-                # No quarterly data at all, set to NaN
-                ttm_revenue, ttm_net_income, ttm_ebit, ttm_op_cash_flow, ttm_capex, ttm_d_and_a = [np.nan] * 6
+            q_fin_T = quarterly_fin.T.sort_index(ascending=False)
+            q_cash_flow_T = quarterly_cash_flow.T.sort_index(ascending=False)
+            ttm_revenue = annualized_sum(
+                q_fin_T.get('Total Revenue', pd.Series(dtype=float))
+            )
+            ttm_net_income = annualized_sum(
+                q_fin_T.get('Net Income', pd.Series(dtype=float))
+            )
+            ttm_ebit = annualized_sum(q_fin_T.get('EBIT', pd.Series(dtype=float)))
+            ttm_op_cash_flow = annualized_sum(
+                first_available_series(
+                    q_cash_flow_T,
+                    ('Operating Cash Flow', 'Total Cash From Operating Activities'),
+                )
+            )
+            ttm_capex = annualized_sum(
+                q_cash_flow_T.get('Capital Expenditure', pd.Series(dtype=float))
+            )
+            ttm_d_and_a = annualized_sum(
+                q_cash_flow_T.get(
+                    'Depreciation And Amortization', pd.Series(dtype=float)
+                )
+            )
 
             # 5. Get latest balance sheet figures from filtered data
+            balance_sheet = balance_sheet.sort_index(axis=1, ascending=False)
             latest_bs = balance_sheet.iloc[:, 0]
             total_debt = latest_bs.get('Total Debt', 0)
             shareholder_equity = latest_bs.get('Stockholders Equity', 0)
             cash_and_equivalents = latest_bs.get('Cash And Cash Equivalents', 0)
-            total_current_assets = latest_bs.get('Total Current Assets', 0)
-            total_current_liabilities = latest_bs.get('Total Current Liabilities', 0)
+            total_assets = latest_bs.get('Total Assets', np.nan)
+            total_current_assets = latest_bs.get(
+                'Current Assets', latest_bs.get('Total Current Assets', np.nan)
+            )
+            total_current_liabilities = latest_bs.get(
+                'Current Liabilities',
+                latest_bs.get('Total Current Liabilities', np.nan),
+            )
             inventory = latest_bs.get('Inventory', 0)
 
             # 6. Calculate all ratios manually
@@ -204,8 +233,16 @@ def fetch_quantitative_data(ticker_symbol, backtest_date=None, period="5y"):
             
             if shareholder_equity > 0:
                 fin_data['roe'] = ttm_net_income / shareholder_equity if ttm_net_income is not None else np.nan
-                fin_data['de_ratio'] = total_debt / shareholder_equity if total_debt is not None else np.nan
+                # Match yfinance's percentage scale: 50 means 0.5x.
+                fin_data['de_ratio'] = total_debt / shareholder_equity * 100 if total_debt is not None else np.nan
                 fin_data['pb_ratio'] = fin_data['market_cap'] / shareholder_equity if fin_data['market_cap'] is not None else np.nan
+
+            capital_employed = total_assets - total_current_liabilities
+            if pd.notna(ttm_ebit) and pd.notna(capital_employed) and capital_employed > 0:
+                fin_data['roce'] = ttm_ebit / capital_employed
+
+            if pd.notna(ttm_op_cash_flow) and pd.notna(ttm_net_income) and ttm_net_income != 0:
+                fin_data['cash_conversion_ratio'] = ttm_op_cash_flow / ttm_net_income
 
             if ttm_net_income is not None and shares_outstanding > 0:
                 fin_data['eps'] = ttm_net_income / shares_outstanding
@@ -257,12 +294,13 @@ def fetch_quantitative_data(ticker_symbol, backtest_date=None, period="5y"):
         raw_data['annual_cash_flow'] = cash_flow
         raw_data['quarterly_financials'] = quarterly_fin
         raw_data['quarterly_balance_sheet'] = quarterly_bal
+        raw_data['quarterly_cash_flow'] = quarterly_cash_flow
         
         # Transpose for easier calculations
-        financials_T = financials.T
-        balance_sheet_T = balance_sheet.T
-        cash_flow_T = cash_flow.T
-        quarterly_fin_T = quarterly_fin.T
+        financials_T = financials.T.sort_index(ascending=False)
+        balance_sheet_T = balance_sheet.T.sort_index(ascending=False)
+        cash_flow_T = cash_flow.T.sort_index(ascending=False)
+        quarterly_fin_T = quarterly_fin.T.sort_index(ascending=False)
         
         # --- Annual Metrics (for growth rates) ---
         if not financials_T.empty:
@@ -293,7 +331,27 @@ def fetch_quantitative_data(ticker_symbol, backtest_date=None, period="5y"):
             if not cash_flow_T.empty and not balance_sheet_T.empty:
                 ebit = financials_T.get('EBIT', pd.Series(dtype=float)).dropna()
                 interest_expense = financials_T.get('Interest Expense', pd.Series(dtype=float)).abs().dropna()
-                op_cash_flow = cash_flow_T.get('Total Cash From Operating Activities', pd.Series(dtype=float)).dropna()
+                op_cash_flow = first_available_series(
+                    cash_flow_T,
+                    ('Operating Cash Flow', 'Total Cash From Operating Activities'),
+                )
+
+                total_assets = first_available_series(balance_sheet_T, ('Total Assets',))
+                current_liabilities = first_available_series(
+                    balance_sheet_T,
+                    ('Current Liabilities', 'Total Current Liabilities'),
+                )
+                capital_dates = ebit.index.intersection(total_assets.index).intersection(
+                    current_liabilities.index
+                )
+                if not capital_dates.empty:
+                    latest_date = capital_dates.max()
+                    capital_employed = (
+                        total_assets.loc[latest_date]
+                        - current_liabilities.loc[latest_date]
+                    )
+                    if pd.notna(capital_employed) and capital_employed > 0:
+                        fin_data['roce'] = ebit.loc[latest_date] / capital_employed
 
                 if not ebit.empty and not interest_expense.empty:
                     latest_ebit = ebit.iloc[0]
@@ -327,11 +385,17 @@ def fetch_quantitative_data(ticker_symbol, backtest_date=None, period="5y"):
                     fin_data['quarterly_eps_growth'] = q_eps.pct_change(fill_method=None).dropna().tolist()
         
         if not quarterly_bal.T.empty:
-            quarterly_bal_T = quarterly_bal.T
+            quarterly_bal_T = quarterly_bal.T.sort_index(ascending=False)
             q_debt = quarterly_bal_T.get('Total Debt', pd.Series(dtype=float)).dropna()
             q_equity = quarterly_bal_T.get('Stockholders Equity', pd.Series(dtype=float)).dropna()
-            q_current_assets = quarterly_bal_T.get('Total Current Assets', pd.Series(dtype=float)).dropna()
-            q_current_liab = quarterly_bal_T.get('Total Current Liabilities', pd.Series(dtype=float)).dropna()
+            q_current_assets = first_available_series(
+                quarterly_bal_T,
+                ('Current Assets', 'Total Current Assets'),
+            )
+            q_current_liab = first_available_series(
+                quarterly_bal_T,
+                ('Current Liabilities', 'Total Current Liabilities'),
+            )
             q_ebit = quarterly_fin_T.get('EBIT', pd.Series(dtype=float)).dropna()
             q_interest = quarterly_fin_T.get('Interest Expense', pd.Series(dtype=float)).abs().dropna()
 

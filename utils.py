@@ -8,7 +8,7 @@ def create_quantitative_skeleton():
         "eps": np.nan,
         "eps_growth_5y": np.nan,
         "roe": np.nan,
-        "roce": np.nan,  # Note: ROCE is not directly available, using ROE as a proxy
+        "roce": np.nan,
         "operating_margin": np.nan,
         "net_margin": np.nan,
         "gross_margin": np.nan,

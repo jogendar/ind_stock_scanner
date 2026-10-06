@@ -6,6 +6,15 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from utils import create_quantitative_skeleton, cagr
 
+
+def first_available_series(frame, names):
+    """Return the first populated Yahoo statement row from ``names``."""
+    for name in names:
+        series = frame.get(name, pd.Series(dtype=float)).dropna()
+        if not series.empty:
+            return series
+    return pd.Series(dtype=float)
+
 def fetch_data_from_screener(ticker, session):
     """Fetches promoter holding data from Screener.in."""
     screener_data = {
@@ -88,7 +97,10 @@ def fetch_quantitative_data(ticker_symbol, period="5y"):
         fin_data['stock_price'] = info.get("regularMarketPrice", info.get("currentPrice", np.nan))
         fin_data['eps'] = info.get("trailingEps", np.nan)
         fin_data['roe'] = info.get("returnOnEquity", np.nan)
-        fin_data['roce'] = info.get("returnOnAssets", np.nan) # Using ROA as proxy for ROCE
+        # Keep return on assets as a fallback.  A true EBIT/capital-employed
+        # calculation replaces it below when the statements contain the
+        # necessary rows.
+        fin_data['roce'] = info.get("returnOnAssets", np.nan)
         fin_data['operating_margin'] = info.get("operatingMargins", np.nan)
         fin_data['net_margin'] = info.get("profitMargins", np.nan)
         fin_data['gross_margin'] = info.get("grossMargins", np.nan)
@@ -118,11 +130,11 @@ def fetch_quantitative_data(ticker_symbol, period="5y"):
         raw_data['quarterly_balance_sheet'] = quarterly_bal
         
         # Transpose for easier calculations
-        financials = financials.T
-        balance_sheet = balance_sheet.T
-        cash_flow = cash_flow.T
-        quarterly_fin = quarterly_fin.T
-        quarterly_bal = quarterly_bal.T
+        financials = financials.T.sort_index(ascending=False)
+        balance_sheet = balance_sheet.T.sort_index(ascending=False)
+        cash_flow = cash_flow.T.sort_index(ascending=False)
+        quarterly_fin = quarterly_fin.T.sort_index(ascending=False)
+        quarterly_bal = quarterly_bal.T.sort_index(ascending=False)
         
         # --- Annual Metrics ---
         if not financials.empty and not balance_sheet.empty and not cash_flow.empty:
@@ -131,7 +143,26 @@ def fetch_quantitative_data(ticker_symbol, period="5y"):
             eps_hist = financials.get('Basic EPS', pd.Series(dtype=float)).dropna()
             ebit = financials.get('EBIT', pd.Series(dtype=float)).dropna()
             interest_expense = financials.get('Interest Expense', pd.Series(dtype=float)).abs().dropna()
-            op_cash_flow = cash_flow.get('Total Cash From Operating Activities', pd.Series(dtype=float)).dropna()
+            op_cash_flow = first_available_series(
+                cash_flow,
+                ('Operating Cash Flow', 'Total Cash From Operating Activities'),
+            )
+
+            total_assets = first_available_series(balance_sheet, ('Total Assets',))
+            current_liabilities = first_available_series(
+                balance_sheet,
+                ('Current Liabilities', 'Total Current Liabilities'),
+            )
+            capital_dates = ebit.index.intersection(total_assets.index).intersection(
+                current_liabilities.index
+            )
+            if not capital_dates.empty:
+                latest_date = capital_dates.max()
+                capital_employed = (
+                    total_assets.loc[latest_date] - current_liabilities.loc[latest_date]
+                )
+                if pd.notna(capital_employed) and capital_employed > 0:
+                    fin_data['roce'] = ebit.loc[latest_date] / capital_employed
             
             if not revenue_hist.empty:
                 fin_data['revenue'] = revenue_hist.iloc[0]
@@ -169,8 +200,14 @@ def fetch_quantitative_data(ticker_symbol, period="5y"):
             q_eps = quarterly_fin.get('Basic EPS', pd.Series(dtype=float)).dropna()
             q_debt = quarterly_bal.get('Total Debt', pd.Series(dtype=float)).dropna()
             q_equity = quarterly_bal.get('Stockholders Equity', pd.Series(dtype=float)).dropna()
-            q_current_assets = quarterly_bal.get('Total Current Assets', pd.Series(dtype=float)).dropna()
-            q_current_liab = quarterly_bal.get('Total Current Liabilities', pd.Series(dtype=float)).dropna()
+            q_current_assets = first_available_series(
+                quarterly_bal,
+                ('Current Assets', 'Total Current Assets'),
+            )
+            q_current_liab = first_available_series(
+                quarterly_bal,
+                ('Current Liabilities', 'Total Current Liabilities'),
+            )
             q_ebit = quarterly_fin.get('EBIT', pd.Series(dtype=float)).dropna()
             q_interest = quarterly_fin.get('Interest Expense', pd.Series(dtype=float)).abs().dropna()
 

@@ -1,6 +1,7 @@
 pandas
 yfinance
 requests
+beautifulsoup4
 schedule
 curl_cffi
 openai
