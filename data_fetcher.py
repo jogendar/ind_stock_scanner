@@ -1,10 +1,56 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import time
 from curl_cffi.requests import Session
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from utils import create_quantitative_skeleton, cagr
+
+
+SCREENER_TIMEOUT_SECONDS = 6
+SCREENER_FAILURE_LIMIT = 3
+SCREENER_COOLDOWN_SECONDS = 300
+
+_screener_consecutive_request_failures = 0
+_screener_retry_after = 0.0
+
+
+def _reset_screener_circuit_breaker():
+    """Reset process-local Screener availability state (primarily for tests)."""
+    global _screener_consecutive_request_failures, _screener_retry_after
+    _screener_consecutive_request_failures = 0
+    _screener_retry_after = 0.0
+
+
+def _screener_request_is_paused():
+    """Return True while repeated request failures are in their cooldown."""
+    global _screener_retry_after
+    if not _screener_retry_after:
+        return False
+    if time.monotonic() < _screener_retry_after:
+        return True
+    _screener_retry_after = 0.0
+    return False
+
+
+def _record_screener_request_failure():
+    global _screener_consecutive_request_failures, _screener_retry_after
+    _screener_consecutive_request_failures += 1
+    if _screener_consecutive_request_failures < SCREENER_FAILURE_LIMIT:
+        return
+    _screener_consecutive_request_failures = 0
+    _screener_retry_after = time.monotonic() + SCREENER_COOLDOWN_SECONDS
+    print(
+        "Screener.in is unavailable; pausing promoter requests for "
+        f"{SCREENER_COOLDOWN_SECONDS // 60} minutes."
+    )
+
+
+def _record_screener_request_success():
+    global _screener_consecutive_request_failures, _screener_retry_after
+    _screener_consecutive_request_failures = 0
+    _screener_retry_after = 0.0
 
 
 def first_available_series(frame, names):
@@ -21,13 +67,41 @@ def fetch_data_from_screener(ticker, session):
         "promoter_holding": np.nan,
         "promoter_holding_growth": np.nan,
     }
+    if _screener_request_is_paused():
+        return screener_data
+
+    base_ticker = ticker.replace('.NS', '')
+    screener_url = f"https://www.screener.in/company/{base_ticker}/consolidated/"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+
     try:
-        base_ticker = ticker.replace('.NS', '')
-        screener_url = f"https://www.screener.in/company/{base_ticker}/consolidated/"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        
-        response = session.get(screener_url, headers=headers, impersonate="chrome110", verify=False)
+        response = session.get(
+            screener_url,
+            headers=headers,
+            impersonate="chrome110",
+            verify=False,
+            timeout=SCREENER_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        print(f"Could not fetch promoter data for {ticker} from Screener.in: {e}")
+        _record_screener_request_failure()
+        return screener_data
+
+    try:
         response.raise_for_status()
+    except Exception as e:
+        print(f"Could not fetch promoter data for {ticker} from Screener.in: {e}")
+        status_code = getattr(response, "status_code", None)
+        if status_code in (403, 429) or (
+            isinstance(status_code, int) and status_code >= 500
+        ):
+            _record_screener_request_failure()
+        else:
+            _record_screener_request_success()
+        return screener_data
+
+    _record_screener_request_success()
+    try:
         soup = BeautifulSoup(response.content, 'html.parser')
         
         # Find the shareholding pattern section

@@ -58,7 +58,10 @@ scan and runs V2 as a supplemental, non-blocking step. V1 continues writing
 `penny_stock_scores_DD_MM_YY.csv` in the repository root. Scheduled V2 uses the
 expanded sub-Rs-25 universe and writes its dated result separately as
 `v2data/multibagger_v2_scores_DD_MM_YY.csv`. A V2 failure does not prevent the
-normal V1 result from being committed.
+normal V1 result from being committed. If Screener.in repeatedly times out,
+promoter-data requests pause for five minutes after three six-second failures;
+this keeps a temporary upstream outage from exhausting GitHub's six-hour job
+limit. The unavailable promoter fields remain missing and receive no points.
 
 ## Backtest stocks recorded below Rs 20
 
