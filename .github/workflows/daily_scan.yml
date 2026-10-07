@@ -1,7 +1,13 @@
 name: Daily Stock Scan
 
 on:
-  workflow_dispatch: # Allows manual triggering
+  workflow_dispatch:
+    inputs:
+      v2_only:
+        description: Rebuild V2 from today's committed V1 snapshot
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: '30 19 * * *' # Runs at 19:30 UTC, which is 1:00 AM IST
 
@@ -10,10 +16,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  run-scan:
+  run-v1:
+    if: ${{ !inputs.v2_only }}
     runs-on: ubuntu-24.04
     env:
       PYTHONUNBUFFERED: '1'
+    outputs:
+      v1_file: ${{ steps.v1_result.outputs.filename }}
     permissions:
       contents: write # <-- This line grants permission to commit files
     steps:
@@ -35,10 +44,14 @@ jobs:
         run: python multibagger.py
 
       - name: Commit and push the V1 result
+        id: v1_result
         run: |
+          v1_file="penny_stock_scores_$(date -u +'%d_%m_%y').csv"
+          test -f "$v1_file"
+          echo "filename=$v1_file" >> "$GITHUB_OUTPUT"
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add penny_stock_scores_*.csv
+          git add "$v1_file"
           if git diff --staged --quiet; then
             echo "No V1 changes to commit."
           else
@@ -46,20 +59,54 @@ jobs:
             git push
           fi
 
+  run-v2:
+    needs: run-v1
+    if: ${{ always() && (needs.run-v1.result == 'success' || inputs.v2_only) }}
+    runs-on: ubuntu-24.04
+    env:
+      PYTHONUNBUFFERED: '1'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout latest main with the V1 result
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Resolve the V1 source snapshot
+        id: v1_source
+        env:
+          V1_FILE_FROM_JOB: ${{ needs.run-v1.outputs.v1_file }}
+        run: |
+          v1_file="$V1_FILE_FROM_JOB"
+          if [ -z "$v1_file" ]; then
+            v1_file="penny_stock_scores_$(date -u +'%d_%m_%y').csv"
+          fi
+          test -f "$v1_file"
+          echo "filename=$v1_file" >> "$GITHUB_OUTPUT"
+
       - name: Run the V2 stock scanner (supplemental)
-        id: v2_scan
-        continue-on-error: true
         run: |
           python multibagger_v2.py \
             --equity-file EQUITY_L.csv \
-            --skip-equity-download \
+            --source-v1-file "${{ steps.v1_source.outputs.filename }}" \
             --price-threshold 25 \
             --candidate-score 50 \
+            --max-error-rate 0.10 \
             --output "v2data/multibagger_v2_scores_$(date -u +'%d_%m_%y').csv"
 
       - name: Report a supplemental V2 failure
-        if: steps.v2_scan.outcome == 'failure'
-        run: echo "::warning title=V2 scan failed::The primary V1 result was already committed."
+        if: failure()
+        run: echo "::error title=V2 scan failed::The primary V1 result was already committed; no partial V2 file will be committed."
 
       - name: Commit and push the V2 result
         run: |

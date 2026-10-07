@@ -54,14 +54,18 @@ python3 multibagger_v2.py \
 ```
 
 The scheduled GitHub workflow keeps the original V1 scanner as its primary
-scan and runs V2 as a supplemental, non-blocking step. V1 continues writing
-`penny_stock_scores_DD_MM_YY.csv` in the repository root. Scheduled V2 uses the
-expanded sub-Rs-25 universe and writes its dated result separately as
-`v2data/multibagger_v2_scores_DD_MM_YY.csv`. A V2 failure does not prevent the
-normal V1 result from being committed. If Screener.in repeatedly times out,
+scan and commits `penny_stock_scores_DD_MM_YY.csv` in the repository root.
+Afterward, V2 starts on a fresh runner and reuses that completed V1 snapshot
+instead of making thousands of duplicate Yahoo fundamentals requests. It only
+batch-fetches one year of market history for the sub-Rs-25 `EQ`/`BE` universe
+and writes `v2data/multibagger_v2_scores_DD_MM_YY.csv`. If more than 10% of
+those market histories are unavailable, V2 fails without committing a partial
+file; the primary V1 result remains committed. If Screener.in repeatedly times out,
 promoter-data requests pause for five minutes after three six-second failures;
 this keeps a temporary upstream outage from exhausting GitHub's six-hour job
 limit. The unavailable promoter fields remain missing and receive no points.
+Manual dispatches also offer a `v2_only` recovery option that rebuilds V2 from
+the current day's already committed V1 snapshot.
 
 ## Backtest stocks recorded below Rs 20
 
